@@ -52,7 +52,7 @@ class ClickHouseConnection implements Connection, PingableConnection, ServerInfo
             'username' => $username,
             'password' => $password,
         ], array_merge([
-            'database' => $params['dbname'] ?? 'default',
+            'database' => $params['dbname'] ?? $params['default_dbname'] ?? 'default',
         ], $params['driverOptions'] ?? []));
         $this->platform = $platform;
     }
