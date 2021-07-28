@@ -634,7 +634,7 @@ class ClickHousePlatform extends AbstractPlatform
     protected function _getCreateTableSQL($tableName, array $columns, array $options = []) : array
     {
         $engine        = ! empty($options['engine']) ? $options['engine'] : 'ReplacingMergeTree';
-        $engineOptions = '';
+        $engineOptions = [];
 
         if (isset($options['uniqueConstraints']) && ! empty($options['uniqueConstraints'])) {
             throw DBALException::notSupported('uniqueConstraints');
@@ -659,147 +659,26 @@ class ClickHousePlatform extends AbstractPlatform
             ],
             true
         )) {
-            $indexGranularity   = ! empty($options['indexGranularity']) ? $options['indexGranularity'] : 8192;
-            $samplingExpression = '';
-
-            /**
-             * eventDateColumn section
-             */
-            $dateColumnParams = [
-                'type' => Type::getType('date'),
-                'default' => 'today()',
-            ];
-            if (! empty($options['eventDateProviderColumn'])) {
-                $options['eventDateProviderColumn'] = trim($options['eventDateProviderColumn']);
-                if (! isset($columns[$options['eventDateProviderColumn']])) {
-                    throw new \Exception(
-                        'Table `' . $tableName . '` has not column with name: `' . $options['eventDateProviderColumn']
-                    );
-                }
-
-                if (! ($columns[$options['eventDateProviderColumn']]['type'] instanceof DateType) &&
-                    ! ($columns[$options['eventDateProviderColumn']]['type'] instanceof DateTimeType) &&
-                    ! ($columns[$options['eventDateProviderColumn']]['type'] instanceof TextType) &&
-                    ! ($columns[$options['eventDateProviderColumn']]['type'] instanceof IntegerType) &&
-                    ! ($columns[$options['eventDateProviderColumn']]['type'] instanceof SmallIntType) &&
-                    ! ($columns[$options['eventDateProviderColumn']]['type'] instanceof BigIntType) &&
-                    ! ($columns[$options['eventDateProviderColumn']]['type'] instanceof FloatType) &&
-                    ! ($columns[$options['eventDateProviderColumn']]['type'] instanceof DecimalType) &&
-                    (
-                        ! ($columns[$options['eventDateProviderColumn']]['type'] instanceof StringType) ||
-                        $columns[$options['eventDateProviderColumn']]['fixed']
-                    )
-                ) {
-                    throw new \Exception(
-                        'Column `' . $options['eventDateProviderColumn'] . '` with type `' .
-                        $columns[$options['eventDateProviderColumn']]['type']->getName() .
-                        '`, defined in `eventDateProviderColumn` option, has not valid DBAL Type'
-                    );
-                }
-
-                $dateColumnParams['default'] =
-                    $columns[$options['eventDateProviderColumn']]['type'] instanceof IntegerType ||
-                    $columns[$options['eventDateProviderColumn']]['type'] instanceof SmallIntType ||
-                    $columns[$options['eventDateProviderColumn']]['type'] instanceof FloatType ?
-                        ('toDate(toDateTime(' . $options['eventDateProviderColumn'] . '))') :
-                        ('toDate(' . $options['eventDateProviderColumn'] . ')');
-            }
-            if (empty($options['eventDateColumn'])) {
-                $dateColumns = array_filter($columns, function ($column) {
-                    return $column['type'] instanceof DateType;
-                });
-
-                if ($dateColumns) {
-                    throw new \Exception(
-                        'Table `' . $tableName . '` has DateType columns: `' . implode(
-                            '`, `',
-                            array_keys($dateColumns)
-                        ) .
-                        '`, but no one of them is setted as `eventDateColumn` with 
-                        $table->addOption("eventDateColumn", "%eventDateColumnName%")'
-                    );
-                }
-
-                $eventDateColumnName = 'EventDate';
-            } elseif (isset($columns[$options['eventDateColumn']])) {
-                if (! ($columns[$options['eventDateColumn']]['type'] instanceof DateType)) {
-                    throw new \Exception(
-                        'In table `' . $tableName . '` you have set field `' .
-                        $options['eventDateColumn'] .
-                        '` (' . get_class($columns[$options['eventDateColumn']]['type']) . ')
-                         as `eventDateColumn`, but it is not instance of DateType'
-                    );
-                }
-
-                $eventDateColumnName = $options['eventDateColumn'];
-                unset($columns[$options['eventDateColumn']]);
-            } else {
-                $eventDateColumnName = $options['eventDateColumn'];
-            }
-            $dateColumnParams['name'] = $eventDateColumnName;
-            // insert into very beginning
-            $columns = [$eventDateColumnName => $dateColumnParams] + $columns;
-
-            /**
-             * Primary key section
-             */
-            if (empty($options['primary'])) {
-                throw new \Exception('You need specify PrimaryKey for MergeTree* tables');
+            if (empty($options['primary']) && empty($options['order'])) {
+                throw new \Exception('You need specify "primary" or "order" option for MergeTree* tables');
             }
 
-            $primaryIndex = array_values($options['primary']);
-            if (! empty($options['samplingExpression'])) {
-                $samplingExpression = ', ' . $options['samplingExpression'];
-                $primaryIndex[]     = $options['samplingExpression'];
+            $orderByOption = $options['order'] ?? null;
+            $primaryOption = implode(', ', (array)($options['primary'] ?? []));
+            $orderBy = $orderByOption ?? $primaryOption;
+            $engineOptions[] = "ORDER BY ({$orderBy})";
+
+            if ($primaryOption && $orderByOption && $primaryOption !== $orderByOption) {
+                $engineOptions[] = "PRIMARY KEY ({$primaryOption})";
             }
-
-            $engineOptions = sprintf(
-                '(%s%s, (%s), %d',
-                $eventDateColumnName,
-                $samplingExpression,
-                implode(
-                    ', ',
-                    array_unique($primaryIndex)
-                ),
-                $indexGranularity
-            );
-
-            /**
-             * any specific MergeTree* table parameters
-             */
-            if ($engine === 'ReplacingMergeTree' && ! empty($options['versionColumn'])) {
-                if (! isset($columns[$options['versionColumn']])) {
-                    throw new \Exception(
-                        'If you specify `versionColumn` for ReplacingMergeTree table -- 
-                        you must add this column manually (any of UInt*, Date or DateTime types)'
-                    );
-                }
-
-                if (! $columns[$options['versionColumn']]['type'] instanceof IntegerType &&
-                    ! $columns[$options['versionColumn']]['type'] instanceof BigIntType &&
-                    ! $columns[$options['versionColumn']]['type'] instanceof SmallIntType &&
-                    ! $columns[$options['versionColumn']]['type'] instanceof DateType &&
-                    ! $columns[$options['versionColumn']]['type'] instanceof DateTimeType
-                ) {
-                    throw new \Exception(
-                        'For ReplacingMergeTree tables `versionColumn` must be any of UInt* family, 
-                        or Date, or DateTime types. ' .
-                        get_class($columns[$options['versionColumn']]['type']) . ' given.'
-                    );
-                }
-
-                $engineOptions .= ', ' . $columns[$options['versionColumn']]['name'];
-            }
-
-            $engineOptions .= ')';
         }
 
         $sql[] = sprintf(
-            'CREATE TABLE %s (%s) ENGINE = %s%s',
+            'CREATE TABLE %s (%s) ENGINE = %s %s',
             $tableName,
             $this->getColumnDeclarationListSQL($columns),
-            $engine,
-            $engineOptions
+            "{$engine}()",
+            implode(' ', $engineOptions)
         );
 
         return $sql;
